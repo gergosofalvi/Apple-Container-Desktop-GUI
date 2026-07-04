@@ -273,7 +273,10 @@ enum ContainerComposeYAML {
                     }
                 }
 
-                if let keyValue = splitKeyValue(itemText) {
+                if itemText.hasPrefix("\"") || itemText.hasPrefix("'") {
+                    sequence.append(.scalar(unquoteScalar(itemText)))
+                } else if let keyValue = splitKeyValue(itemText),
+                          keyValue.key.range(of: #"^[A-Za-z_][A-Za-z0-9_-]*$"#, options: .regularExpression) != nil {
                     sequence.append(.mapping([(keyValue.key, .scalar(keyValue.value))]))
                 } else if !itemText.isEmpty {
                     sequence.append(.scalar(unquoteScalar(itemText)))

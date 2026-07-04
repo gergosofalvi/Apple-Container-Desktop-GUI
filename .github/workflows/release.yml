@@ -48,6 +48,7 @@ jobs:
             -project "$PROJECT" \
             -scheme "$SCHEME" \
             -destination 'platform=macOS' \
+            -parallel-testing-enabled NO \
             -only-testing:apple.containers.guiTests \
             CODE_SIGN_IDENTITY="-" \
             CODE_SIGNING_ALLOWED=YES \

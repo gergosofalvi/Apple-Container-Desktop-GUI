@@ -1,0 +1,11 @@
+{
+  "folders": [
+    {
+      "path": "apple.containers.gui",
+      "name": "Apple Container Desktop"
+    }
+  ],
+  "settings": {
+    "swift.sourcekit-lsp.backgroundIndexing": true
+  }
+}

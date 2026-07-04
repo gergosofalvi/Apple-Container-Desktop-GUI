@@ -54,12 +54,16 @@ jobs:
             DEVELOPMENT_TEAM=""
 
       - name: Import signing certificate
-        if: ${{ secrets.APPLE_CERTIFICATE_BASE64 != '' }}
         env:
           APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
         run: |
+          if [[ -z "${APPLE_CERTIFICATE_BASE64:-}" ]]; then
+            echo "No signing certificate configured; using ad-hoc signing."
+            exit 0
+          fi
+
           CERTIFICATE_PATH="$RUNNER_TEMP/build_certificate.p12"
           KEYCHAIN_PATH="$RUNNER_TEMP/app-signing.keychain-db"
 
@@ -75,6 +79,7 @@ jobs:
       - name: Build Release app
         env:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
         run: |
           set -euo pipefail
 
@@ -88,7 +93,7 @@ jobs:
             CODE_SIGN_IDENTITY="-"
           )
 
-          if [[ -n "${APPLE_TEAM_ID:-}" && -n "${{ secrets.APPLE_CERTIFICATE_BASE64 }}" ]]; then
+          if [[ -n "${APPLE_TEAM_ID:-}" && -n "${APPLE_CERTIFICATE_BASE64:-}" ]]; then
             SIGN_ARGS=(
               CODE_SIGNING_ALLOWED=YES
               DEVELOPMENT_TEAM="$APPLE_TEAM_ID"
@@ -107,7 +112,7 @@ jobs:
 
           mkdir -p "$EXPORT_DIR"
 
-          if [[ -n "${APPLE_TEAM_ID:-}" && -n "${{ secrets.APPLE_CERTIFICATE_BASE64 }}" ]]; then
+          if [[ -n "${APPLE_TEAM_ID:-}" && -n "${APPLE_CERTIFICATE_BASE64:-}" ]]; then
             /usr/libexec/PlistBuddy -c "Set :teamID $APPLE_TEAM_ID" .github/macos-export-options.plist
             xcodebuild -exportArchive \
               -archivePath "$ARCHIVE_PATH" \
@@ -128,12 +133,17 @@ jobs:
           echo "APP_PATH=$DIST_DIR/$APP_NAME.app" >> "$GITHUB_ENV"
 
       - name: Notarize app
-        if: ${{ secrets.APPLE_ID != '' && secrets.APPLE_APP_SPECIFIC_PASSWORD != '' && secrets.APPLE_TEAM_ID != '' && secrets.APPLE_CERTIFICATE_BASE64 != '' }}
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
         run: |
+          if [[ -z "${APPLE_ID:-}" || -z "${APPLE_APP_SPECIFIC_PASSWORD:-}" || -z "${APPLE_TEAM_ID:-}" || -z "${APPLE_CERTIFICATE_BASE64:-}" ]]; then
+            echo "Skipping notarization; required secrets not configured."
+            exit 0
+          fi
+
           set -euo pipefail
           ZIP_PATH="$RUNNER_TEMP/$ZIP_NAME"
           xcrun notarytool submit "$ZIP_PATH" \

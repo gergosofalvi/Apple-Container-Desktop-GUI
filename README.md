@@ -6,7 +6,7 @@ Manage containers, machines, compose imports, logs, and integrated terminals fro
 
 ## Requirements
 
-- macOS 26.5 or later
+- macOS 26.4 or later
 - [Apple container CLI](https://github.com/apple/container) installed
 
 ## Install
@@ -65,7 +65,7 @@ To produce Developer ID signed and notarized builds in GitHub Actions, configure
 | `APPLE_ID` | Apple ID email for notarization |
 | `APPLE_APP_SPECIFIC_PASSWORD` | App-specific password for notarization |
 
-Without these secrets, releases are ad-hoc signed and installable after the Gatekeeper step above.
+Without these secrets, releases are ad-hoc signed and installable after the Gatekeeper step above. **You do not need an Apple Developer account** for CI or ad-hoc releases.
 
 ## License
 

@@ -166,7 +166,7 @@ jobs:
 
             1. Download `Apple-Container-Desktop-${{ steps.version.outputs.version }}-macos-arm64.zip`.
             2. Unzip and move `Apple Container Desktop.app` to `/Applications`.
-            3. Requires macOS 26.5 or later and Apple's [container CLI](https://github.com/apple/container).
+            3. Requires macOS 26.4 or later and Apple's [container CLI](https://github.com/apple/container).
 
             ## Gatekeeper
 

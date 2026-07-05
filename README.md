@@ -1,12 +1,18 @@
 # Apple Container Desktop
-<img width="1084" height="709" alt="image" src="https://github.com/user-attachments/assets/c092229a-8501-4a65-ab9e-6217247fd46e" />
-<img width="634" height="823" alt="image" src="https://github.com/user-attachments/assets/78e78bb6-2401-44be-b0cf-3ae91c11cea2" />
-![Uploading image.png…]()
+
+<p align="center">
+  <a href="https://github.com/user-attachments/assets/c092229a-8501-4a65-ab9e-6217247fd46e" target="_blank">
+    <img src="https://github.com/user-attachments/assets/c092229a-8501-4a65-ab9e-6217247fd46e" width="45%" alt="Apple Container Desktop Screenshot 1" />
+  </a>
+  &nbsp;&nbsp;
+  <a href="https://github.com/user-attachments/assets/78e78bb6-2401-44be-b0cf-3ae91c11cea2" target="_blank">
+    <img src="https://github.com/user-attachments/assets/78e78bb6-2401-44be-b0cf-3ae91c11cea2" width="26%" alt="Apple Container Desktop Screenshot 2" />
+  </a>
+</p>
 
 macOS GUI for Apple's [container](https://github.com/apple/container) CLI.
 
 Manage containers, machines, compose imports, logs, and integrated terminals from a native desktop app.
-
 ## Requirements
 
 - macOS 26.4 or later

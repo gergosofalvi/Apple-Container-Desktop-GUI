@@ -42,21 +42,59 @@ struct ContainerRecord: Identifiable, Hashable, Sendable {
     }
 
     var mountPaths: [String] {
-        configuration?.mounts?.compactMap { mount in
-            if let source = mount.source, let target = mount.target {
-                return "\(source) → \(target)"
-            }
-            return mount.target ?? mount.source
-        } ?? []
+        bindMountDisplays
     }
 
     var volumePaths: [String] {
-        configuration?.volumes?.compactMap { volume in
-            if let source = volume.source, let target = volume.target {
-                return "\(source) → \(target)"
-            }
-            return volume.target ?? volume.source
+        namedVolumeDisplays
+    }
+
+    var bindMountDisplays: [String] {
+        configuration?.mounts?.compactMap { mount in
+            guard let target = mount.target, !target.isEmpty else { return nil }
+            let source = mount.source ?? "?"
+            let ro = mount.readonly == true ? " (ro)" : ""
+            return "\(source) → \(target)\(ro)"
         } ?? []
+    }
+
+    var namedVolumeDisplays: [String] {
+        configuration?.volumes?.compactMap { volume in
+            guard let target = volume.target, !target.isEmpty else { return nil }
+            let name = Self.volumeName(from: volume.source) ?? volume.source ?? "?"
+            let ro = volume.readonly == true ? " (ro)" : ""
+            return "\(name) → \(target)\(ro)"
+        } ?? []
+    }
+
+    var platformDisplay: String {
+        guard let platform = configuration?.platform else { return "—" }
+        let os = platform.os ?? "linux"
+        let arch = platform.architecture ?? "unknown"
+        return "\(os)/\(arch)"
+    }
+
+    var imageDigestDisplay: String {
+        configuration?.imageDigest ?? "—"
+    }
+
+    var sourceFileDisplay: String? {
+        configuration?.labels?["com.apple.container.source"]
+            ?? configuration?.labels?["compose.project"]
+    }
+
+    static func volumeName(from source: String?) -> String? {
+        guard let source, !source.isEmpty else { return nil }
+        if source.contains("/volumes/") {
+            let parts = source.split(separator: "/")
+            if let index = parts.firstIndex(of: "volumes"), index + 1 < parts.count {
+                return String(parts[index + 1])
+            }
+        }
+        if !source.contains("/") {
+            return source
+        }
+        return nil
     }
 
     var publishedPorts: [String] {
@@ -96,6 +134,8 @@ struct ContainerConfiguration: Hashable, Sendable {
     let id: String?
     let hostname: String?
     let image: String?
+    let imageDigest: String?
+    let platform: MachinePlatform?
     let workdir: String?
     let mounts: [MountSpec]?
     let volumes: [MountSpec]?
@@ -104,6 +144,7 @@ struct ContainerConfiguration: Hashable, Sendable {
     let process: ProcessSpec?
     let labels: [String: String]?
     let env: [String]?
+    let networkNames: [String]?
 }
 
 struct MountSpec: Hashable, Sendable {
@@ -284,6 +325,8 @@ struct MachineRecord: Identifiable, Hashable, Sendable {
 
 enum SidebarSection: String, CaseIterable, Identifiable {
     case containers = "Containers"
+    case volumes = "Volumes"
+    case networks = "Networks"
     case machines = "Machines"
     case settings = "Settings"
 
@@ -292,6 +335,8 @@ enum SidebarSection: String, CaseIterable, Identifiable {
     var icon: String {
         switch self {
         case .containers: "shippingbox"
+        case .volumes: "externaldrive"
+        case .networks: "network"
         case .machines: "desktopcomputer"
         case .settings: "gearshape"
         }
@@ -316,6 +361,10 @@ struct CreateContainerForm {
     var workdir = ""
     var cpus = ""
     var memory = ""
+    var networkName = "default"
+    var groupMode: CreateContainerGroupMode = .none
+    var selectedExistingGroupID: UUID?
+    var newGroupName = ""
     var portMappings: [PortMapping] = []
     var volumeMounts: [VolumeMount] = []
     var envVars: [EnvVariable] = []
@@ -345,11 +394,28 @@ struct CreateContainerForm {
         if image.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return "Image is required. Example: alpine:latest or nginx:alpine"
         }
+        switch groupMode {
+        case .none:
+            break
+        case .existing:
+            if selectedExistingGroupID == nil {
+                return "Select a group or choose a different group option."
+            }
+        case .new:
+            if newGroupName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return "New group name is required."
+            }
+        }
         return nil
     }
 
+    var isNetworkLockedToGroup: Bool {
+        groupMode == .existing && selectedExistingGroupID != nil
+    }
+
     func ensureHostPathsExist() throws {
-        try VolumeMountPaths.ensureHostPathsExist(for: volumeMounts)
+        let bindMounts = volumeMounts.filter { $0.kind == .bind }
+        try VolumeMountPaths.ensureHostPathsExist(for: bindMounts)
     }
 
     func cliVolumes() -> [String] {
@@ -379,6 +445,7 @@ struct CreateContainerForm {
         form.workdir = record.workdir ?? ""
         form.cpus = cpusLine(from: record.configuration?.resources?.cpus)
         form.memory = memoryLine(from: record.configuration?.resources?.memoryInBytes)
+        form.networkName = record.networkNames.first ?? "default"
         form.volumeMounts = volumeMounts(from: record.configuration)
         form.portMappings = portMappings(from: record.configuration?.publish)
         form.envVars = envVars(from: record.configuration?.env)
@@ -407,16 +474,34 @@ struct CreateContainerForm {
     }
 
     private static func volumeMounts(from configuration: ContainerConfiguration?) -> [VolumeMount] {
-        let mounts = configuration?.mounts ?? []
-        let volumes = configuration?.volumes ?? []
-        return (mounts + volumes).compactMap { mount in
-            guard let target = mount.target, !target.isEmpty else { return nil }
-            return VolumeMount(
-                hostPath: mount.source ?? "",
-                containerPath: target,
-                readOnly: mount.readonly == true
+        var result: [VolumeMount] = []
+
+        for mount in configuration?.mounts ?? [] {
+            guard let target = mount.target, !target.isEmpty else { continue }
+            result.append(
+                VolumeMount(
+                    kind: .bind,
+                    hostPath: mount.source ?? "",
+                    containerPath: target,
+                    readOnly: mount.readonly == true
+                )
             )
         }
+
+        for volume in configuration?.volumes ?? [] {
+            guard let target = volume.target, !target.isEmpty else { continue }
+            let volumeName = ContainerRecord.volumeName(from: volume.source) ?? volume.source ?? ""
+            result.append(
+                VolumeMount(
+                    kind: .named,
+                    volumeName: volumeName,
+                    containerPath: target,
+                    readOnly: volume.readonly == true
+                )
+            )
+        }
+
+        return result
     }
 
     private static func portMappings(from ports: [PublishPort]?) -> [PortMapping] {

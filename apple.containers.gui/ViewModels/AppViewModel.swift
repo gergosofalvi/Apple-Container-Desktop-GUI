@@ -28,8 +28,13 @@ final class AppViewModel {
 
     var selectedSection: SidebarSection = .containers
     var containers: [ContainerRecord] = []
+    var volumes: [VolumeRecord] = []
+    var networks: [NetworkRecord] = []
+    var containerGroups: [ContainerGroup] = []
     var machines: [MachineRecord] = []
     var selectedContainerID: String?
+    var selectedVolumeName: String?
+    var selectedNetworkName: String?
     var selectedMachineID: String?
 
     var selectedContainer: ContainerRecord? {
@@ -39,6 +44,24 @@ final class AppViewModel {
     var selectedMachine: MachineRecord? {
         machines.first { $0.displayID == selectedMachineID }
     }
+
+    var selectedVolume: VolumeRecord? {
+        volumes.first { $0.name == selectedVolumeName }
+    }
+
+    var selectedNetwork: NetworkRecord? {
+        networks.first { $0.name == selectedNetworkName }
+    }
+
+    var showCreateNetwork = false
+    var showCreateVolume = false
+    var showManageGroup = false
+    var createNetworkForm = CreateNetworkForm()
+    var createVolumeForm = CreateVolumeForm()
+    var createNetworkError: String?
+    var createVolumeError: String?
+    var manageGroupForm = ManageGroupForm()
+    var manageGroupError: String?
 
     var showCreateContainer = false
     var showEditContainer = false
@@ -118,6 +141,7 @@ final class AppViewModel {
                 containerCLIPath = path
             }
             try await cli.ensureSystemRunning()
+            containerGroups = ContainerGroupStore.load()
             await refreshAll()
             startAutoRefresh()
         } catch {
@@ -143,14 +167,31 @@ final class AppViewModel {
 
         do {
             async let containerList = cli.listContainers(all: true)
+            async let volumeList = cli.listVolumes()
+            async let networkList = cli.listNetworks()
             async let machineList = cli.listMachines()
             containers = try await containerList
+            volumes = try await volumeList
+            networks = try await networkList
             machines = try await machineList
+            pruneMissingGroupMembers()
 
             if selectedContainerID == nil {
                 selectedContainerID = containers.first?.id
             } else if !containers.contains(where: { $0.id == selectedContainerID }) {
                 selectedContainerID = containers.first?.id
+            }
+
+            if selectedVolumeName == nil {
+                selectedVolumeName = volumes.first?.name
+            } else if !volumes.contains(where: { $0.name == selectedVolumeName }) {
+                selectedVolumeName = volumes.first?.name
+            }
+
+            if selectedNetworkName == nil {
+                selectedNetworkName = networks.first?.name
+            } else if !networks.contains(where: { $0.name == selectedNetworkName }) {
+                selectedNetworkName = networks.first?.name
             }
 
             if selectedMachineID == nil {
@@ -282,6 +323,39 @@ final class AppViewModel {
         createContainerTerminalCommand = nil
         composeImportSourceName = nil
         showCreateContainer = true
+        Task { await ensureResourceListsLoaded() }
+    }
+
+    func prepareCreateGroupSheet() {
+        manageGroupForm = ManageGroupForm()
+        manageGroupError = nil
+        showManageGroup = true
+        Task { await ensureResourceListsLoaded() }
+    }
+
+    func prepareManageGroupSheet(group: ContainerGroup) {
+        manageGroupForm = ManageGroupForm(
+            groupID: group.id,
+            name: group.name,
+            networkName: group.networkName,
+            selectedContainerIDs: Set(group.memberContainerIDs)
+        )
+        manageGroupError = nil
+        showManageGroup = true
+        Task { await ensureResourceListsLoaded() }
+    }
+
+    func ensureResourceListsLoaded() async {
+        do {
+            if networks.isEmpty {
+                networks = try await cli.listNetworks()
+            }
+            if volumes.isEmpty {
+                volumes = try await cli.listVolumes()
+            }
+        } catch {
+            reportError(from: error.localizedDescription)
+        }
     }
 
     func exportSelectedContainerToCompose() async {
@@ -365,6 +439,442 @@ final class AppViewModel {
         showImportComposePicker = false
     }
 
+    func importComposeStack(named stackName: String, networkName: String = "default") async {
+        guard let document = pendingComposeImport else {
+            applyGlobalError(from: "No compose file is loaded.")
+            return
+        }
+
+        let trimmedName = stackName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedName.isEmpty else {
+            applyGlobalError(from: "Stack name is required.")
+            return
+        }
+
+        let serviceNames = document.services.keys.sorted {
+            $0.localizedCaseInsensitiveCompare($1) == .orderedAscending
+        }
+        guard !serviceNames.isEmpty else {
+            applyGlobalError(from: "Compose file does not contain any services.")
+            return
+        }
+
+        let sourceFile = composeImportSourceName
+        let stackNetwork = networkName.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty ?? "default"
+        pendingComposeImport = nil
+        composeImportSourceName = nil
+        showImportComposePicker = false
+        showCreateContainer = false
+        showContainerRunProgress = true
+        isContainerRunInProgress = true
+        containerRunProgressOutput = "Deploying stack \"\(trimmedName)\"...\n"
+        containerRunProgressTitle = trimmedName
+
+        var memberIDs: [String] = []
+
+        do {
+            for serviceName in serviceNames {
+                guard let service = document.services[serviceName] else { continue }
+                var form = service.toCreateContainerForm(serviceName: serviceName)
+                form.networkName = stackNetwork
+                try form.ensureHostPathsExist()
+
+                containerRunProgressOutput += "\n--- \(serviceName) ---\n"
+
+                let containerID = try await runContainerFromForm(form) { [weak self] chunk in
+                    Task { @MainActor in
+                        self?.containerRunProgressOutput += chunk
+                    }
+                }
+
+                let selectedID = form.name.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty ?? containerID
+                memberIDs.append(selectedID)
+                setContainerTransition(selectedID, .creating)
+            }
+
+            let group = ContainerGroup(
+                name: trimmedName,
+                networkName: stackNetwork,
+                memberContainerIDs: memberIDs,
+                sourceFile: sourceFile
+            )
+            containerGroups.append(group)
+            persistContainerGroups()
+
+            isContainerRunInProgress = false
+            showContainerRunProgress = false
+            createContainerForm.reset()
+
+            await refreshLists(silent: false)
+            selectedSection = .containers
+            selectedContainerID = memberIDs.first
+            showToast("Stack \"\(trimmedName)\" deployed with \(memberIDs.count) containers.")
+            scheduleAcceleratedPolling()
+        } catch {
+            isContainerRunInProgress = false
+            showContainerRunProgress = false
+            applyGlobalError(from: error.localizedDescription)
+        }
+    }
+
+    func containers(in group: ContainerGroup) -> [ContainerRecord] {
+        let ids = Set(group.memberContainerIDs)
+        return containers.filter { ids.contains($0.id) }
+    }
+
+    var ungroupedContainers: [ContainerRecord] {
+        let groupedIDs = Set(containerGroups.flatMap(\.memberContainerIDs))
+        return containers.filter { !groupedIDs.contains($0.id) }
+    }
+
+    func containers(usingVolume volumeName: String) -> [ContainerRecord] {
+        ContainerResourceIndex.containers(usingVolume: volumeName, in: containers)
+    }
+
+    func containers(onNetwork networkName: String) -> [ContainerRecord] {
+        ContainerResourceIndex.containers(onNetwork: networkName, in: containers)
+    }
+
+    func deleteContainerGroup(_ group: ContainerGroup) {
+        containerGroups.removeAll { $0.id == group.id }
+        persistContainerGroups()
+    }
+
+    func saveManageGroup() async -> Bool {
+        manageGroupError = nil
+        let isCreate = manageGroupForm.groupID == nil
+        if let validationError = manageGroupForm.validate(isCreate: isCreate) {
+            manageGroupError = validationError
+            return false
+        }
+
+        let name = manageGroupForm.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let network = manageGroupForm.networkName.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty ?? "default"
+        let selectedIDs = manageGroupForm.selectedContainerIDs
+
+        isLoading = true
+        defer { isLoading = false }
+
+        do {
+            if isCreate {
+                var memberIDs: [String] = []
+                for containerID in selectedIDs.sorted() {
+                    removeContainerFromOtherGroups(containerID)
+                    let newID = try await recreateContainerWithNetwork(containerID, network: network)
+                    memberIDs.append(newID)
+                }
+                let group = ContainerGroup(
+                    name: name,
+                    networkName: network,
+                    memberContainerIDs: memberIDs
+                )
+                containerGroups.append(group)
+                persistContainerGroups()
+            } else if let groupID = manageGroupForm.groupID,
+                      let index = containerGroups.firstIndex(where: { $0.id == groupID }) {
+                let oldGroup = containerGroups[index]
+                let oldMembers = Set(oldGroup.memberContainerIDs)
+                let newMembers = selectedIDs
+                let added = newMembers.subtracting(oldMembers)
+                let networkChanged = oldGroup.networkName != network
+
+                var updatedMemberIDs = Array(newMembers)
+                var idMapping: [String: String] = [:]
+
+                let needsRecreate: Set<String> = networkChanged ? newMembers : added
+                for containerID in needsRecreate.sorted() {
+                    removeContainerFromOtherGroups(containerID, except: groupID)
+                    let newID = try await recreateContainerWithNetwork(containerID, network: network)
+                    idMapping[containerID] = newID
+                }
+
+                updatedMemberIDs = newMembers.map { idMapping[$0] ?? $0 }
+
+                if updatedMemberIDs.isEmpty {
+                    containerGroups.remove(at: index)
+                } else {
+                    containerGroups[index] = ContainerGroup(
+                        id: groupID,
+                        name: name,
+                        networkName: network,
+                        memberContainerIDs: updatedMemberIDs,
+                        sourceFile: oldGroup.sourceFile,
+                        createdAt: oldGroup.createdAt
+                    )
+                }
+                persistContainerGroups()
+            }
+
+            manageGroupForm.reset()
+            showManageGroup = false
+            await refreshLists(silent: false)
+            selectedSection = .containers
+            showToast(isCreate ? "Group \"\(name)\" created." : "Group \"\(name)\" updated.")
+            return true
+        } catch {
+            manageGroupError = error.localizedDescription
+            return false
+        }
+    }
+
+    private func assignContainerToGroup(containerID: String, form: CreateContainerForm) {
+        switch form.groupMode {
+        case .none:
+            break
+        case .existing:
+            guard let groupID = form.selectedExistingGroupID,
+                  let index = containerGroups.firstIndex(where: { $0.id == groupID }) else {
+                return
+            }
+            removeContainerFromOtherGroups(containerID, except: groupID)
+            var group = containerGroups[index]
+            if !group.memberContainerIDs.contains(containerID) {
+                group.memberContainerIDs.append(containerID)
+                containerGroups[index] = group
+                persistContainerGroups()
+            }
+        case .new:
+            let name = form.newGroupName.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !name.isEmpty else { return }
+            let network = form.networkName.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty ?? "default"
+            removeContainerFromOtherGroups(containerID)
+            let group = ContainerGroup(
+                name: name,
+                networkName: network,
+                memberContainerIDs: [containerID]
+            )
+            containerGroups.append(group)
+            persistContainerGroups()
+        }
+    }
+
+    private func removeContainerFromOtherGroups(_ containerID: String, except groupID: UUID? = nil) {
+        var changed = false
+        containerGroups = containerGroups.map { group in
+            guard group.id != groupID else { return group }
+            var updated = group
+            let filtered = updated.memberContainerIDs.filter { $0 != containerID }
+            if filtered.count != updated.memberContainerIDs.count {
+                updated.memberContainerIDs = filtered
+                changed = true
+            }
+            return updated
+        }
+        if changed {
+            persistContainerGroups()
+        }
+    }
+
+    private func recreateContainerWithNetwork(_ containerID: String, network: String) async throws -> String {
+        let record = try await cli.inspectContainer(id: containerID)
+        var form = CreateContainerForm.from(record: record)
+        form.networkName = network
+        let command = originalCommand(from: record)
+        let effectiveCommand = command.isEmpty ? form.commandParts() : command
+        return try await recreateContainer(originalID: containerID, form: form, command: effectiveCommand)
+    }
+
+    private func recreateContainer(
+        originalID: String,
+        form: CreateContainerForm,
+        command: [String],
+        onOutput: (@Sendable (String) -> Void)? = nil
+    ) async throws -> String {
+        try form.ensureHostPathsExist()
+
+        if containers.first(where: { $0.id == originalID })?.isRunning == true {
+            try await cli.stopContainer(id: originalID)
+        }
+        try await cli.deleteContainer(id: originalID, force: true)
+
+        let containerName = form.name.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty ?? originalID
+        let network = form.networkName.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty ?? "default"
+        let newID = try await cli.runContainer(
+            image: form.image.trimmingCharacters(in: .whitespacesAndNewlines),
+            name: containerName,
+            command: command,
+            volumes: form.cliVolumes(),
+            ports: form.cliPorts(),
+            env: form.cliEnv(),
+            workdir: form.workdir.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty,
+            cpus: form.cpus.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty,
+            memory: form.memory.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty,
+            network: network,
+            onOutput: onOutput
+        )
+
+        return containerName.nilIfEmpty ?? newID.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    func containerGroup(for containerID: String) -> ContainerGroup? {
+        containerGroups.first { $0.memberContainerIDs.contains(containerID) }
+    }
+
+    func openContainerFromResource(_ containerID: String) {
+        selectedSection = .containers
+        selectedContainerID = containerID
+    }
+
+    func prepareCreateVolumeSheet() {
+        createVolumeForm.reset()
+        createVolumeError = nil
+        showCreateVolume = true
+    }
+
+    func prepareCreateNetworkSheet() {
+        createNetworkForm.reset()
+        createNetworkError = nil
+        showCreateNetwork = true
+    }
+
+    func createVolumeNamed(_ name: String) async -> Bool {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+
+        do {
+            try await cli.createVolume(name: trimmed)
+            volumes = try await cli.listVolumes()
+            return true
+        } catch {
+            reportError(from: error.localizedDescription)
+            return false
+        }
+    }
+
+    func createVolume() async -> Bool {
+        createVolumeError = nil
+        if let validationError = createVolumeForm.validate() {
+            createVolumeError = validationError
+            return false
+        }
+
+        let name = createVolumeForm.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        isLoading = true
+        defer { isLoading = false }
+
+        do {
+            try await cli.createVolume(name: name)
+            createVolumeForm.reset()
+            showCreateVolume = false
+            await refreshLists(silent: false)
+            selectedSection = .volumes
+            selectedVolumeName = name
+            return true
+        } catch {
+            createVolumeError = error.localizedDescription
+            return false
+        }
+    }
+
+    func createNetwork() async -> Bool {
+        createNetworkError = nil
+        if let validationError = createNetworkForm.validate() {
+            createNetworkError = validationError
+            return false
+        }
+
+        let name = createNetworkForm.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let subnet = createNetworkForm.subnet.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+        isLoading = true
+        defer { isLoading = false }
+
+        do {
+            try await cli.createNetwork(
+                name: name,
+                subnet: subnet,
+                internalOnly: createNetworkForm.internalOnly
+            )
+            createNetworkForm.reset()
+            showCreateNetwork = false
+            await refreshLists(silent: false)
+            selectedSection = .networks
+            selectedNetworkName = name
+            return true
+        } catch {
+            createNetworkError = error.localizedDescription
+            return false
+        }
+    }
+
+    func deleteSelectedVolume() async {
+        guard let name = selectedVolumeName else { return }
+        isLoading = true
+        defer { isLoading = false }
+
+        do {
+            try await cli.deleteVolume(name: name)
+            selectedVolumeName = nil
+            await refreshLists(silent: false)
+        } catch {
+            applyGlobalError(from: error.localizedDescription)
+        }
+    }
+
+    func deleteSelectedNetwork() async {
+        guard let name = selectedNetworkName else { return }
+        isLoading = true
+        defer { isLoading = false }
+
+        do {
+            try await cli.deleteNetwork(name: name)
+            selectedNetworkName = nil
+            await refreshLists(silent: false)
+        } catch {
+            applyGlobalError(from: error.localizedDescription)
+        }
+    }
+
+    func fetchVolumeInspect(for name: String) async throws -> VolumeRecord {
+        try await cli.inspectVolume(name: name)
+    }
+
+    func fetchNetworkInspect(for name: String) async throws -> NetworkRecord {
+        try await cli.inspectNetwork(name: name)
+    }
+
+    private func persistContainerGroups() {
+        ContainerGroupStore.save(containerGroups)
+    }
+
+    private func pruneMissingGroupMembers() {
+        let existingIDs = Set(containers.map(\.id))
+        var changed = false
+        containerGroups = containerGroups.map { group in
+            var updated = group
+            let filtered = updated.memberContainerIDs.filter { existingIDs.contains($0) }
+            if filtered.count != updated.memberContainerIDs.count {
+                updated.memberContainerIDs = filtered
+                changed = true
+            }
+            return updated
+        }
+        if changed {
+            persistContainerGroups()
+        }
+    }
+
+    private func runContainerFromForm(
+        _ form: CreateContainerForm,
+        onOutput: (@Sendable (String) -> Void)? = nil
+    ) async throws -> String {
+        let image = form.image.trimmingCharacters(in: .whitespacesAndNewlines)
+        let containerName = form.name.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+
+        return try await cli.runContainer(
+            image: image,
+            name: containerName,
+            command: form.commandParts(),
+            volumes: form.cliVolumes(),
+            ports: form.cliPorts(),
+            env: form.cliEnv(),
+            workdir: form.workdir.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty,
+            cpus: form.cpus.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty,
+            memory: form.memory.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty,
+            network: form.networkName.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty ?? "default",
+            onOutput: onOutput
+        )
+    }
+
     func prepareEditContainerSheet() async {
         guard let id = selectedContainerID else { return }
 
@@ -379,6 +889,7 @@ final class AppViewModel {
             editContainerOriginalCommand = originalCommand(from: record)
             editContainerForm = CreateContainerForm.from(record: record)
             showEditContainer = true
+            Task { await ensureResourceListsLoaded() }
         } catch {
             applyGlobalError(from: error.localizedDescription)
         }
@@ -406,23 +917,10 @@ final class AppViewModel {
         do {
             let commandParts = form.commandParts()
             let effectiveCommand = commandParts.isEmpty ? editContainerOriginalCommand : commandParts
-            try form.ensureHostPathsExist()
-
-            if containers.first(where: { $0.id == originalID })?.isRunning == true {
-                try await cli.stopContainer(id: originalID)
-            }
-            try await cli.deleteContainer(id: originalID, force: true)
-
-            let newID = try await cli.runContainer(
-                image: form.image.trimmingCharacters(in: .whitespacesAndNewlines),
-                name: containerName,
-                command: effectiveCommand,
-                volumes: form.cliVolumes(),
-                ports: form.cliPorts(),
-                env: form.cliEnv(),
-                workdir: form.workdir.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty,
-                cpus: form.cpus.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty,
-                memory: form.memory.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+            let newID = try await recreateContainer(
+                originalID: originalID,
+                form: form,
+                command: effectiveCommand
             )
 
             editContainerForm.reset()
@@ -479,6 +977,7 @@ final class AppViewModel {
                 workdir: form.workdir.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty,
                 cpus: form.cpus.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty,
                 memory: form.memory.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty,
+                network: form.networkName.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty ?? "default",
                 onOutput: { [weak self] chunk in
                     Task { @MainActor in
                         self?.containerRunProgressOutput += chunk
@@ -495,6 +994,8 @@ final class AppViewModel {
             if !selectedID.isEmpty {
                 setContainerTransition(selectedID, .creating)
             }
+
+            assignContainerToGroup(containerID: selectedID.isEmpty ? id : selectedID, form: form)
 
             await refreshLists(silent: false)
             selectedSection = .containers

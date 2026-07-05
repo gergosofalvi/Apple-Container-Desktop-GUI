@@ -60,7 +60,7 @@ enum VolumeMountPaths {
     }
 
     static func ensureHostPathsExist(for mounts: [VolumeMount]) throws {
-        for mount in mounts {
+        for mount in mounts where mount.kind == .bind {
             let rawPath = mount.hostPath.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !rawPath.isEmpty else { continue }
             guard rawPath.hasPrefix("/") || rawPath.hasPrefix("~") else { continue }

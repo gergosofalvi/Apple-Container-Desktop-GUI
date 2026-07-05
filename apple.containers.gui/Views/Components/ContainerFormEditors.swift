@@ -157,7 +157,10 @@ struct PortMappingsEditor: View {
 }
 
 struct VolumeMountsEditor: View {
+    @Environment(AppViewModel.self) private var model
     @Binding var volumeMounts: [VolumeMount]
+    var availableVolumes: [VolumeRecord] = []
+    @State private var creatingVolumeID: UUID?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -165,14 +168,19 @@ struct VolumeMountsEditor: View {
                 Text("Volume mounts")
                     .font(.headline)
                 Spacer()
-                Button {
-                    volumeMounts.append(VolumeMount())
+                Menu {
+                    Button("Add bind mount") {
+                        volumeMounts.append(VolumeMount(kind: .bind))
+                    }
+                    Button("Add named volume") {
+                        volumeMounts.append(VolumeMount(kind: .named))
+                    }
                 } label: {
                     Label("Add mount", systemImage: "plus")
                 }
             }
 
-            Text("Bind a folder from your Mac into the container.")
+            Text("Bind a host folder or attach an existing named volume into the container.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
@@ -184,20 +192,71 @@ struct VolumeMountsEditor: View {
             } else {
                 ForEach($volumeMounts) { $mount in
                     VStack(alignment: .leading, spacing: 8) {
+                        Picker("Type", selection: $mount.kind) {
+                            ForEach(VolumeMount.Kind.allCases) { kind in
+                                Text(kind.label).tag(kind)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+
                         HStack(spacing: 8) {
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text("Host path")
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
-                                HStack {
-                                    TextField(VolumeMountPaths.expandedDefaultDataDirectory, text: $mount.hostPath)
-                                        .textFieldStyle(.roundedBorder)
-                                    PathBrowseButton(
-                                        path: $mount.hostPath,
-                                        allowsDirectories: true,
-                                        allowsFiles: false,
-                                        defaultDirectory: VolumeMountPaths.defaultDataDirectoryURL
-                                    )
+                            switch mount.kind {
+                            case .bind:
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("Host path")
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                    HStack {
+                                        TextField(VolumeMountPaths.expandedDefaultDataDirectory, text: $mount.hostPath)
+                                            .textFieldStyle(.roundedBorder)
+                                        PathBrowseButton(
+                                            path: $mount.hostPath,
+                                            allowsDirectories: true,
+                                            allowsFiles: false,
+                                            defaultDirectory: VolumeMountPaths.defaultDataDirectoryURL
+                                        )
+                                    }
+                                }
+                            case .named:
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("Volume name")
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                    HStack(spacing: 8) {
+                                        if !availableVolumes.isEmpty {
+                                            Picker("Volume", selection: $mount.volumeName) {
+                                                Text("Select or type…").tag("")
+                                                ForEach(availableVolumes) { volume in
+                                                    Text(volume.name).tag(volume.name)
+                                                }
+                                            }
+                                            .labelsHidden()
+                                            .frame(minWidth: 140)
+                                        }
+                                        TextField("my-volume", text: $mount.volumeName)
+                                            .textFieldStyle(.roundedBorder)
+                                        Button {
+                                            Task {
+                                                creatingVolumeID = mount.id
+                                                let success = await model.createVolumeNamed(mount.volumeName)
+                                                creatingVolumeID = nil
+                                                if success {
+                                                    mount.volumeName = mount.volumeName.trimmingCharacters(in: .whitespacesAndNewlines)
+                                                }
+                                            }
+                                        } label: {
+                                            if creatingVolumeID == mount.id {
+                                                ProgressView()
+                                                    .controlSize(.small)
+                                            } else {
+                                                Text("Create")
+                                            }
+                                        }
+                                        .disabled(
+                                            mount.volumeName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                                                || creatingVolumeID == mount.id
+                                        )
+                                    }
                                 }
                             }
 
@@ -309,11 +368,150 @@ struct PathBrowseButton: View {
     }
 }
 
+struct NetworkPicker: View {
+    let title: String
+    let help: String
+    @Binding var networkName: String
+    let networks: [NetworkRecord]
+    var isDisabled = false
+
+    private var networkOptions: [String] {
+        var names = ["default"]
+        for network in networks where !names.contains(network.name) {
+            names.append(network.name)
+        }
+        if !names.contains(networkName), !networkName.isEmpty {
+            names.append(networkName)
+        }
+        return names
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title)
+                .font(.headline)
+
+            Text(help)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.leading)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            Picker("Network", selection: $networkName) {
+                ForEach(networkOptions, id: \.self) { name in
+                    Text(name).tag(name)
+                }
+            }
+            .labelsHidden()
+            .pickerStyle(.menu)
+            .frame(maxWidth: 320, alignment: .leading)
+            .disabled(isDisabled)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .opacity(isDisabled ? 0.75 : 1)
+    }
+}
+
+struct ContainerGroupPicker: View {
+    @Environment(AppViewModel.self) private var model
+    @Binding var form: CreateContainerForm
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Group")
+                .font(.headline)
+
+            Text("Optionally add this container to a group. Existing groups lock the network to the group network.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            Picker("Group mode", selection: $form.groupMode) {
+                ForEach(CreateContainerGroupMode.allCases) { mode in
+                    Text(mode.label).tag(mode)
+                }
+            }
+            .pickerStyle(.segmented)
+            .onChange(of: form.groupMode) { _, newMode in
+                applyGroupModeChange(newMode)
+            }
+
+            switch form.groupMode {
+            case .none:
+                EmptyView()
+            case .existing:
+                if model.containerGroups.isEmpty {
+                    Text("No groups yet. Create one first or choose “Create new group”.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Picker("Existing group", selection: $form.selectedExistingGroupID) {
+                        Text("Select group…").tag(UUID?.none)
+                        ForEach(model.containerGroups) { group in
+                            Text(group.name).tag(Optional(group.id))
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .frame(maxWidth: 320, alignment: .leading)
+                    .onChange(of: form.selectedExistingGroupID) { _, groupID in
+                        syncNetworkFromSelectedGroup(groupID)
+                    }
+                }
+            case .new:
+                FormTextField(
+                    title: "New group name",
+                    help: "A new group is created after the container starts.",
+                    placeholder: "My Stack",
+                    text: $form.newGroupName
+                )
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func applyGroupModeChange(_ mode: CreateContainerGroupMode) {
+        switch mode {
+        case .none:
+            form.selectedExistingGroupID = nil
+            form.newGroupName = ""
+        case .existing:
+            form.newGroupName = ""
+            if form.selectedExistingGroupID == nil {
+                form.selectedExistingGroupID = model.containerGroups.first?.id
+            }
+            syncNetworkFromSelectedGroup(form.selectedExistingGroupID)
+        case .new:
+            form.selectedExistingGroupID = nil
+        }
+    }
+
+    private func syncNetworkFromSelectedGroup(_ groupID: UUID?) {
+        guard let groupID,
+              let group = model.containerGroups.first(where: { $0.id == groupID }) else {
+            return
+        }
+        form.networkName = group.networkName
+    }
+}
+
 struct ContainerFormFields: View {
+    @Environment(AppViewModel.self) private var model
     @Binding var form: CreateContainerForm
     var showPresetPicker = true
     var showCommand = true
+    var showGroupPicker = false
     var lockName = false
+
+    private var networkHelp: String {
+        if form.isNetworkLockedToGroup {
+            return "Network is set by the selected group and cannot be changed here."
+        }
+        if form.groupMode == .new {
+            return "Network used for this container and the new group."
+        }
+        return "Attach the container to an existing network. Default is used when no custom network is needed."
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
@@ -379,9 +577,25 @@ struct ContainerFormFields: View {
 
             LeftAlignedGroupBox("Networking & Storage") {
                 VStack(alignment: .leading, spacing: 20) {
+                    if showGroupPicker {
+                        ContainerGroupPicker(form: $form)
+                        Divider()
+                    }
+
+                    NetworkPicker(
+                        title: "Network",
+                        help: networkHelp,
+                        networkName: $form.networkName,
+                        networks: model.networks,
+                        isDisabled: form.isNetworkLockedToGroup
+                    )
+                    Divider()
                     PortMappingsEditor(portMappings: $form.portMappings)
                     Divider()
-                    VolumeMountsEditor(volumeMounts: $form.volumeMounts)
+                    VolumeMountsEditor(
+                        volumeMounts: $form.volumeMounts,
+                        availableVolumes: model.volumes
+                    )
                     Divider()
                     EnvVariablesEditor(envVars: $form.envVars)
                 }

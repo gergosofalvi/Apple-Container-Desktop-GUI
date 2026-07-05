@@ -456,12 +456,24 @@ private extension VolumeMount {
             let body = String(trimmed.dropLast(3))
             let parts = body.split(separator: ":", maxSplits: 1).map(String.init)
             guard parts.count == 2 else { return nil }
-            return VolumeMount(hostPath: parts[0], containerPath: parts[1], readOnly: true)
+            return mountFromComposeSource(parts[0], containerPath: parts[1], readOnly: true)
         }
 
         let parts = trimmed.split(separator: ":", maxSplits: 1).map(String.init)
         guard parts.count == 2 else { return nil }
-        return VolumeMount(hostPath: parts[0], containerPath: parts[1], readOnly: false)
+        return mountFromComposeSource(parts[0], containerPath: parts[1], readOnly: false)
+    }
+
+    static func mountFromComposeSource(_ source: String, containerPath: String, readOnly: Bool) -> VolumeMount {
+        let isBind = source.hasPrefix("/")
+            || source.hasPrefix("~")
+            || source.hasPrefix(".")
+            || source.contains("/")
+
+        if isBind {
+            return VolumeMount(kind: .bind, hostPath: source, containerPath: containerPath, readOnly: readOnly)
+        }
+        return VolumeMount(kind: .named, volumeName: source, containerPath: containerPath, readOnly: readOnly)
     }
 }
 

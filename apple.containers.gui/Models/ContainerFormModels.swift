@@ -1,5 +1,21 @@
 import Foundation
 
+enum CreateContainerGroupMode: String, CaseIterable, Identifiable, Sendable {
+    case none
+    case existing
+    case new
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .none: "No group"
+        case .existing: "Existing group"
+        case .new: "Create new group"
+        }
+    }
+}
+
 struct PortMapping: Identifiable, Hashable, Sendable {
     let id: UUID
     var hostPort: String
@@ -27,26 +43,74 @@ struct PortMapping: Identifiable, Hashable, Sendable {
 }
 
 struct VolumeMount: Identifiable, Hashable, Sendable {
+    enum Kind: String, CaseIterable, Identifiable, Sendable {
+        case bind
+        case named
+
+        var id: String { rawValue }
+
+        var label: String {
+            switch self {
+            case .bind: "Bind mount"
+            case .named: "Named volume"
+            }
+        }
+    }
+
     let id: UUID
+    var kind: Kind
     var hostPath: String
+    var volumeName: String
     var containerPath: String
     var readOnly: Bool
 
-    init(id: UUID = UUID(), hostPath: String = "", containerPath: String = "", readOnly: Bool = false) {
+    init(
+        id: UUID = UUID(),
+        kind: Kind = .bind,
+        hostPath: String = "",
+        volumeName: String = "",
+        containerPath: String = "",
+        readOnly: Bool = false
+    ) {
         self.id = id
+        self.kind = kind
         self.hostPath = hostPath
+        self.volumeName = volumeName
         self.containerPath = containerPath
         self.readOnly = readOnly
     }
 
     var cliValue: String? {
-        let host = hostPath.trimmingCharacters(in: .whitespaces)
         let target = containerPath.trimmingCharacters(in: .whitespaces)
-        guard !host.isEmpty, !target.isEmpty else { return nil }
-        if readOnly {
-            return "\(host):\(target):ro"
+        guard !target.isEmpty else { return nil }
+
+        switch kind {
+        case .bind:
+            let host = hostPath.trimmingCharacters(in: .whitespaces)
+            guard !host.isEmpty else { return nil }
+            if readOnly {
+                return "\(host):\(target):ro"
+            }
+            return "\(host):\(target)"
+        case .named:
+            let volume = volumeName.trimmingCharacters(in: .whitespaces)
+            guard !volume.isEmpty else { return nil }
+            if readOnly {
+                return "\(volume):\(target):ro"
+            }
+            return "\(volume):\(target)"
         }
-        return "\(host):\(target)"
+    }
+
+    var displayValue: String {
+        switch kind {
+        case .bind:
+            let host = hostPath.isEmpty ? "?" : hostPath
+            return "\(host) → \(containerPath)\(readOnly ? " (ro)" : "")"
+        case .named:
+            let volume = volumeName.isEmpty ? "?" : volumeName
+            return "\(volume) → \(containerPath)\(readOnly ? " (ro)" : "")"
+        }
     }
 }
 

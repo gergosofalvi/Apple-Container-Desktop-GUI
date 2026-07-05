@@ -124,6 +124,12 @@ struct ContentView: View {
         .sheet(isPresented: $model.showCreateMachine) {
             CreateMachineSheet()
         }
+        .sheet(isPresented: $model.showCreateVolume) {
+            CreateVolumeSheet()
+        }
+        .sheet(isPresented: $model.showCreateNetwork) {
+            CreateNetworkSheet()
+        }
         .sheet(isPresented: $model.showImportComposePicker) {
             if let document = model.importComposeServiceNames, !document.isEmpty {
                 ImportComposeSheet(serviceNames: document)
@@ -139,6 +145,10 @@ struct ContentView: View {
         switch model.selectedSection {
         case .containers:
             ContainerListPanel()
+        case .volumes:
+            VolumeListPanel()
+        case .networks:
+            NetworkListPanel()
         case .machines:
             MachineListPanel()
         case .settings:
@@ -160,6 +170,32 @@ struct ContentView: View {
                     actionTitle: "Run Container"
                 ) {
                     model.prepareCreateContainerSheet()
+                }
+            }
+        case .volumes:
+            if let volume = model.selectedVolume {
+                VolumeDetailView(volume: volume)
+            } else {
+                EmptyStateView(
+                    title: "No Volume Selected",
+                    subtitle: "Select a volume to inspect usage and delete it.",
+                    systemImage: "externaldrive",
+                    actionTitle: "Create Volume"
+                ) {
+                    model.prepareCreateVolumeSheet()
+                }
+            }
+        case .networks:
+            if let network = model.selectedNetwork {
+                NetworkDetailView(network: network)
+            } else {
+                EmptyStateView(
+                    title: "No Network Selected",
+                    subtitle: "Create a network or select one to see connected containers.",
+                    systemImage: "network",
+                    actionTitle: "Create Network"
+                ) {
+                    model.prepareCreateNetworkSheet()
                 }
             }
         case .machines:

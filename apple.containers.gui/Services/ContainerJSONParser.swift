@@ -60,15 +60,97 @@ enum ContainerJSONParser {
             id: stringValue(config["id"]),
             hostname: networkHostname(from: config["networks"]),
             image: imageReference,
+            imageDigest: imageDigest(from: config["image"]),
+            platform: platform(from: config["platform"]),
             workdir: stringValue(initProcess?["workingDirectory"]),
             mounts: mountSpecs(from: config["mounts"]),
             volumes: mountSpecs(from: config["volumes"]),
             publish: publishPorts(from: config["publishedPorts"]),
             resources: resourceSpec(from: resources),
             process: processSpec(from: initProcess),
-            labels: nil,
-            env: stringArray(from: initProcess?["environment"])
+            labels: stringDictionary(from: config["labels"]),
+            env: stringArray(from: initProcess?["environment"]),
+            networkNames: networkNames(from: config["networks"])
         )
+    }
+
+    nonisolated static func parseVolumeList(_ text: String) throws -> [VolumeRecord] {
+        let items = try parseJSONArray(text)
+        return items.map { volumeRecord(from: $0) }
+    }
+
+    nonisolated static func parseVolumeInspect(_ text: String) throws -> VolumeRecord {
+        let items = try parseJSONArray(text)
+        guard let first = items.first else {
+            throw ContainerCLIError.invalidOutput("No inspect data returned for volume.")
+        }
+        return volumeRecord(from: first)
+    }
+
+    nonisolated static func parseNetworkList(_ text: String) throws -> [NetworkRecord] {
+        let items = try parseJSONArray(text)
+        return items.map { networkRecord(from: $0) }
+    }
+
+    nonisolated static func parseNetworkInspect(_ text: String) throws -> NetworkRecord {
+        let items = try parseJSONArray(text)
+        guard let first = items.first else {
+            throw ContainerCLIError.invalidOutput("No inspect data returned for network.")
+        }
+        return networkRecord(from: first)
+    }
+
+    nonisolated private static func volumeRecord(from dict: [String: Any]) -> VolumeRecord {
+        let config = dict["configuration"] as? [String: Any]
+        let name = stringValue(dict["id"])
+            ?? stringValue(config?["name"])
+            ?? "unknown"
+
+        return VolumeRecord(
+            name: name,
+            driver: stringValue(config?["driver"]),
+            format: stringValue(config?["format"]),
+            sizeInBytes: int64Value(config?["sizeInBytes"]),
+            creationDate: stringValue(config?["creationDate"]),
+            source: stringValue(config?["source"]),
+            labels: stringDictionary(from: config?["labels"])
+        )
+    }
+
+    nonisolated private static func networkRecord(from dict: [String: Any]) -> NetworkRecord {
+        let config = dict["configuration"] as? [String: Any]
+        let status = dict["status"] as? [String: Any]
+        let name = stringValue(dict["id"])
+            ?? stringValue(config?["name"])
+            ?? "unknown"
+
+        return NetworkRecord(
+            name: name,
+            plugin: stringValue(config?["plugin"]),
+            mode: stringValue(config?["mode"]),
+            ipv4Subnet: stringValue(status?["ipv4Subnet"]),
+            ipv4Gateway: stringValue(status?["ipv4Gateway"]),
+            ipv6Subnet: stringValue(status?["ipv6Subnet"]),
+            creationDate: stringValue(config?["creationDate"]),
+            labels: stringDictionary(from: config?["labels"])
+        )
+    }
+
+    nonisolated private static func networkNames(from value: Any?) -> [String]? {
+        guard let array = value as? [[String: Any]], !array.isEmpty else { return nil }
+        let names = array.compactMap { stringValue($0["network"]) }
+        return names.isEmpty ? nil : names
+    }
+
+    nonisolated private static func stringDictionary(from value: Any?) -> [String: String]? {
+        guard let dict = value as? [String: Any], !dict.isEmpty else { return nil }
+        var result: [String: String] = [:]
+        for (key, value) in dict {
+            if let string = stringValue(value) {
+                result[key] = string
+            }
+        }
+        return result.isEmpty ? nil : result
     }
 
     nonisolated private static func containerNetworks(from value: Any?) -> [ContainerNetwork]? {
@@ -139,6 +221,15 @@ enum ContainerJSONParser {
             return nil
         }
         return ContainerImageRef(reference: reference, name: nil)
+    }
+
+    nonisolated private static func imageDigest(from value: Any?) -> String? {
+        guard let dict = value as? [String: Any],
+              let descriptor = dict["descriptor"] as? [String: Any],
+              let digest = stringValue(descriptor["digest"]) else {
+            return nil
+        }
+        return digest
     }
 
     nonisolated private static func machineRecord(from dict: [String: Any]) -> MachineRecord {

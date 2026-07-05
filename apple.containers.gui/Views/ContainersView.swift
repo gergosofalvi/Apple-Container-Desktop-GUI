@@ -16,9 +16,29 @@ struct ContainerListPanel: View {
                     Text("Run a container to see it here.")
                 }
             } else {
-                ForEach(model.containers) { container in
-                    ContainerListRow(container: container)
-                        .tag(container.id)
+                ForEach(model.containerGroups) { group in
+                    Section {
+                        ForEach(model.containers(in: group)) { container in
+                            ContainerListRow(container: container)
+                                .tag(container.id)
+                        }
+                    } header: {
+                        ContainerGroupHeader(
+                            group: group,
+                            containerCount: model.containers(in: group).count
+                        )
+                    }
+                }
+
+                if !model.ungroupedContainers.isEmpty {
+                    Section {
+                        ForEach(model.ungroupedContainers) { container in
+                            ContainerListRow(container: container)
+                                .tag(container.id)
+                        }
+                    } header: {
+                        Text(model.containerGroups.isEmpty ? "Containers" : "Ungrouped")
+                    }
                 }
             }
         }
@@ -29,6 +49,11 @@ struct ContainerListPanel: View {
                     showCLIHelp = true
                 } label: {
                     Label("CLI Help", systemImage: "questionmark.circle")
+                }
+                Button {
+                    model.prepareCreateGroupSheet()
+                } label: {
+                    Label("Create Group", systemImage: "square.stack.3d.up")
                 }
                 Button {
                     model.importContainerCompose()
@@ -48,6 +73,9 @@ struct ContainerListPanel: View {
         .sheet(isPresented: $showCLIHelp) {
             ContainerCLIReferenceView()
                 .frame(minWidth: 520, minHeight: 420)
+        }
+        .sheet(isPresented: $model.showManageGroup) {
+            ManageGroupSheet()
         }
     }
 }
@@ -180,12 +208,12 @@ struct ContainerDetailView: View {
     let container: ContainerRecord
 
     @State private var inspectData: ContainerRecord?
-    @State private var showAdvanced = false
 
     var body: some View {
         @Bindable var model = model
         let record = inspectData ?? container
         let display = model.containerDisplayStatus(for: record.id)
+        let stack = model.containerGroup(for: record.id)
 
         ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
@@ -194,7 +222,8 @@ struct ContainerDetailView: View {
                         subtitle: record.imageReference,
                         status: display.label,
                         isRunning: display.isRunning,
-                        isTransitioning: display.isTransitioning
+                        isTransitioning: display.isTransitioning,
+                        badge: stack?.name
                     )
 
                     ContainerActionButtons(
@@ -205,33 +234,57 @@ struct ContainerDetailView: View {
 
                     LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 12) {
                         InfoCard(title: "Image", value: record.imageReference, icon: "shippingbox")
-                        InfoCard(title: "Resources", value: "\(record.cpusDisplay) CPU · \(record.memoryDisplay)", icon: "cpu")
+                        InfoCard(title: "Platform", value: record.platformDisplay, icon: "cpu")
+                        InfoCard(title: "Resources", value: "\(record.cpusDisplay) CPU · \(record.memoryDisplay)", icon: "memorychip")
                         InfoCard(title: "Command", value: record.commandDisplay, icon: "terminal")
-                        InfoCard(title: "IP", value: record.networks?.first?.address ?? "—", icon: "network")
+                        InfoCard(
+                            title: "Networks",
+                            value: record.networkNames.isEmpty ? "—" : record.networkNames.joined(separator: ", "),
+                            icon: "network"
+                        )
                     }
 
                     if let ports = record.configuration?.publish, !ports.isEmpty {
                         PublishedPortsSection(ports: ports)
                     }
 
-                    let mounts = record.mountPaths + record.volumePaths
-                    if !mounts.isEmpty {
-                        CompactListSection(title: "Mounts", icon: "externaldrive", items: mounts)
+                    if !record.bindMountDisplays.isEmpty {
+                        CompactListSection(title: "Bind mounts", icon: "folder", items: record.bindMountDisplays)
                     }
 
-                    DisclosureGroup(isExpanded: $showAdvanced) {
+                    if !record.namedVolumeDisplays.isEmpty {
+                        CompactListSection(title: "Named volumes", icon: "externaldrive", items: record.namedVolumeDisplays)
+                    }
+
+                    LeftAlignedGroupBox("Advanced details") {
                         VStack(alignment: .leading, spacing: 8) {
+                            DetailRow(label: "Image digest", value: record.imageDigestDisplay)
                             DetailRow(label: "Workdir", value: record.workdir ?? "—")
+
+                            if let stack {
+                                DetailRow(label: "Group", value: stack.name)
+                                DetailRow(label: "Group network", value: stack.networkName)
+                                if let source = stack.sourceFile {
+                                    DetailRow(label: "Source file", value: source)
+                                }
+                            } else if let source = record.sourceFileDisplay {
+                                DetailRow(label: "Source file", value: source)
+                            }
+
                             if let networks = record.networks, !networks.isEmpty {
                                 ForEach(Array(networks.enumerated()), id: \.offset) { _, network in
-                                    DetailRow(label: network.network ?? "Network", value: network.address ?? "—")
+                                    let address = [network.address, network.gateway]
+                                        .compactMap { $0 }
+                                        .filter { !$0.isEmpty }
+                                        .joined(separator: " · gateway ")
+                                    DetailRow(
+                                        label: network.network ?? "Network",
+                                        value: address.isEmpty ? "—" : address
+                                    )
                                 }
                             }
                         }
-                        .padding(.top, 8)
-                    } label: {
-                        Label("Advanced details", systemImage: "chevron.down")
-                            .font(.subheadline.weight(.medium))
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
                 .padding()

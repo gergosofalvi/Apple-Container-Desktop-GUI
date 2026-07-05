@@ -163,14 +163,97 @@ actor ContainerCLI {
         workdir: String? = nil,
         cpus: String? = nil,
         memory: String? = nil,
+        network: String? = nil,
         onOutput: (@Sendable (String) -> Void)? = nil
     ) async throws -> String {
+        let args = buildRunArguments(
+            platform: nil,
+            image: image,
+            name: name,
+            detach: detach,
+            command: command,
+            volumes: volumes,
+            ports: ports,
+            env: env,
+            workdir: workdir,
+            cpus: cpus,
+            memory: memory,
+            network: network
+        )
+
+        let result = try await runStreaming(args, onOutput: onOutput)
+        if result.exitCode == 0 {
+            return result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        let failureOutput = result.combinedOutput
+        guard Self.shouldRetryWithAMD64Emulation(failureOutput) else {
+            throw ContainerCLIError.commandFailed(failureOutput.isEmpty ? "Container run failed." : failureOutput)
+        }
+
+        onOutput?("\nImage has no native arm64 variant. Pulling linux/amd64 and running with emulation...\n\n")
+
+        let amd64Args = buildRunArguments(
+            platform: Self.fallbackPlatform,
+            image: image,
+            name: name,
+            detach: detach,
+            command: command,
+            volumes: volumes,
+            ports: ports,
+            env: env,
+            workdir: workdir,
+            cpus: cpus,
+            memory: memory,
+            network: network
+        )
+
+        let retryResult = try await runStreaming(amd64Args, onOutput: onOutput)
+        if retryResult.exitCode == 0 {
+            return retryResult.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        let retryOutput = retryResult.combinedOutput
+        throw ContainerCLIError.commandFailed(
+            retryOutput.isEmpty ? "Container run failed after amd64 fallback." : retryOutput
+        )
+    }
+
+    private static let fallbackPlatform = "linux/amd64"
+
+    private static func shouldRetryWithAMD64Emulation(_ output: String) -> Bool {
+        let normalized = output.lowercased()
+        return normalized.contains("does not support required platforms")
+            || normalized.contains("unsupported platform")
+            || normalized.contains("unsupported: \"platform linux/arm64")
+    }
+
+    private func buildRunArguments(
+        platform: String?,
+        image: String,
+        name: String?,
+        detach: Bool,
+        command: [String],
+        volumes: [String],
+        ports: [String],
+        env: [String],
+        workdir: String?,
+        cpus: String?,
+        memory: String?,
+        network: String?
+    ) -> [String] {
         var args = ["run"]
         if detach {
             args.append("-d")
         }
+        if let platform, !platform.isEmpty {
+            args += ["--platform", platform]
+        }
         if let name, !name.isEmpty {
             args += ["--name", name]
+        }
+        if let network, !network.isEmpty {
+            args += ["--network", network]
         }
         for volume in volumes where !volume.isEmpty {
             args += ["-v", volume]
@@ -192,12 +275,7 @@ actor ContainerCLI {
         }
         args.append(image)
         args.append(contentsOf: command)
-
-        let result = try await runStreaming(args, onOutput: onOutput)
-        if result.exitCode != 0 {
-            throw ContainerCLIError.commandFailed(result.combinedOutput.isEmpty ? "Container run failed." : result.combinedOutput)
-        }
-        return result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        return args
     }
 
     func stopContainer(id: String) async throws {
@@ -223,6 +301,89 @@ actor ContainerCLI {
         let result = try await run(args)
         if result.exitCode != 0 {
             throw ContainerCLIError.commandFailed(result.stderr.isEmpty ? result.stdout : result.stderr)
+        }
+    }
+
+    func listVolumes() async throws -> [VolumeRecord] {
+        let result = try await run(["volume", "ls", "--format", "json"])
+        if result.exitCode != 0 {
+            throw ContainerCLIError.commandFailed(result.combinedOutput)
+        }
+        return try ContainerJSONParser.parseVolumeList(result.stdout)
+    }
+
+    func inspectVolume(name: String) async throws -> VolumeRecord {
+        let result = try await run(["volume", "inspect", name])
+        if result.exitCode != 0 {
+            throw ContainerCLIError.commandFailed(result.combinedOutput)
+        }
+        return try ContainerJSONParser.parseVolumeInspect(result.stdout)
+    }
+
+    func createVolume(name: String) async throws {
+        let result = try await run(["volume", "create", name])
+        if result.exitCode != 0 {
+            throw ContainerCLIError.commandFailed(result.combinedOutput)
+        }
+    }
+
+    func deleteVolume(name: String) async throws {
+        let result = try await run(["volume", "rm", name])
+        if result.exitCode != 0 {
+            throw ContainerCLIError.commandFailed(result.combinedOutput)
+        }
+    }
+
+    func pruneVolumes() async throws {
+        let result = try await run(["volume", "prune"])
+        if result.exitCode != 0 {
+            throw ContainerCLIError.commandFailed(result.combinedOutput)
+        }
+    }
+
+    func listNetworks() async throws -> [NetworkRecord] {
+        let result = try await run(["network", "ls", "--format", "json"])
+        if result.exitCode != 0 {
+            throw ContainerCLIError.commandFailed(result.combinedOutput)
+        }
+        return try ContainerJSONParser.parseNetworkList(result.stdout)
+    }
+
+    func inspectNetwork(name: String) async throws -> NetworkRecord {
+        let result = try await run(["network", "inspect", name])
+        if result.exitCode != 0 {
+            throw ContainerCLIError.commandFailed(result.combinedOutput)
+        }
+        return try ContainerJSONParser.parseNetworkInspect(result.stdout)
+    }
+
+    func createNetwork(name: String, subnet: String? = nil, internalOnly: Bool = false) async throws {
+        var args = ["network", "create"]
+        if internalOnly {
+            args.append("--internal")
+        }
+        if let subnet, !subnet.isEmpty {
+            args += ["--subnet", subnet]
+        }
+        args.append(name)
+
+        let result = try await run(args)
+        if result.exitCode != 0 {
+            throw ContainerCLIError.commandFailed(result.combinedOutput)
+        }
+    }
+
+    func deleteNetwork(name: String) async throws {
+        let result = try await run(["network", "rm", name])
+        if result.exitCode != 0 {
+            throw ContainerCLIError.commandFailed(result.combinedOutput)
+        }
+    }
+
+    func pruneNetworks() async throws {
+        let result = try await run(["network", "prune"])
+        if result.exitCode != 0 {
+            throw ContainerCLIError.commandFailed(result.combinedOutput)
         }
     }
 

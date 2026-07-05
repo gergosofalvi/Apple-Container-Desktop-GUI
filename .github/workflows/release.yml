@@ -4,15 +4,13 @@ on:
   push:
     tags:
       - 'v*'
-  workflow_dispatch:
-    inputs:
-      version:
-        description: 'Release version (for example 1.0.0)'
-        required: true
-        default: '1.0.0'
 
 permissions:
   contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build-macos-arm64:
@@ -25,16 +23,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Resolve version
+      - name: Resolve version from tag
         id: version
         run: |
-          if [[ "${{ github.ref_type }}" == "tag" ]]; then
-            VERSION="${GITHUB_REF_NAME#v}"
-          else
-            VERSION="${{ github.event.inputs.version }}"
-          fi
+          VERSION="${GITHUB_REF_NAME#v}"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "Building version $VERSION"
+          echo "Building version $VERSION from tag $GITHUB_REF_NAME"
 
       - name: Select Xcode
         run: sudo xcode-select -s "/Applications/Xcode_26.5.app/Contents/Developer"
@@ -50,6 +44,7 @@ jobs:
             -destination 'platform=macOS' \
             -parallel-testing-enabled NO \
             -only-testing:apple.containers.guiTests \
+            MARKETING_VERSION="${{ steps.version.outputs.version }}" \
             CODE_SIGN_IDENTITY="-" \
             CODE_SIGNING_ALLOWED=YES \
             DEVELOPMENT_TEAM=""
@@ -84,6 +79,7 @@ jobs:
         run: |
           set -euo pipefail
 
+          VERSION="${{ steps.version.outputs.version }}"
           BUILD_DIR="$RUNNER_TEMP/DerivedData"
           ARCHIVE_PATH="$RUNNER_TEMP/$SCHEME.xcarchive"
           EXPORT_DIR="$RUNNER_TEMP/export"
@@ -92,6 +88,7 @@ jobs:
             CODE_SIGNING_ALLOWED=YES
             DEVELOPMENT_TEAM=""
             CODE_SIGN_IDENTITY="-"
+            MARKETING_VERSION="$VERSION"
           )
 
           if [[ -n "${APPLE_TEAM_ID:-}" && -n "${APPLE_CERTIFICATE_BASE64:-}" ]]; then
@@ -99,6 +96,7 @@ jobs:
               CODE_SIGNING_ALLOWED=YES
               DEVELOPMENT_TEAM="$APPLE_TEAM_ID"
               CODE_SIGN_IDENTITY="Developer ID Application"
+              MARKETING_VERSION="$VERSION"
             )
           fi
 
@@ -124,11 +122,13 @@ jobs:
             APP_PATH="$ARCHIVE_PATH/Products/Applications/apple.containers.gui.app"
           fi
 
+          /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP_PATH/Contents/Info.plist"
+
           DIST_DIR="$RUNNER_TEMP/dist"
           mkdir -p "$DIST_DIR"
           cp -R "$APP_PATH" "$DIST_DIR/$APP_NAME.app"
 
-          ZIP_NAME="Apple-Container-Desktop-${{ steps.version.outputs.version }}-macos-arm64.zip"
+          ZIP_NAME="Apple-Container-Desktop-${VERSION}-macos-arm64.zip"
           ditto -c -k --keepParent "$DIST_DIR/$APP_NAME.app" "$RUNNER_TEMP/$ZIP_NAME"
           echo "ZIP_NAME=$ZIP_NAME" >> "$GITHUB_ENV"
           echo "APP_PATH=$DIST_DIR/$APP_NAME.app" >> "$GITHUB_ENV"
@@ -163,10 +163,9 @@ jobs:
           if-no-files-found: error
 
       - name: Create GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('v{0}', steps.version.outputs.version) }}
+          tag_name: ${{ github.ref_name }}
           name: Apple Container Desktop ${{ steps.version.outputs.version }}
           draft: false
           prerelease: false
@@ -190,5 +189,6 @@ jobs:
 
             ## Build info
 
+            - Version: ${{ steps.version.outputs.version }}
             - Platform: macOS arm64
             - Built with Xcode 26.5 on GitHub Actions (`macos-26`)

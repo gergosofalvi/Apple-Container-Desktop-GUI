@@ -42,15 +42,14 @@ find ~/Library/Developer/Xcode/DerivedData -path '*Release/apple.containers.gui.
 
 ## CI and releases
 
-- **CI** runs on every push and pull request to `main`.
-- **Release** runs on version tags such as `v1.0.0` and publishes a signed macOS zip to GitHub Releases.
-
-Create a release locally:
+Releases are built only when you push a version tag. The tag name becomes the app version (`v1.0.1` → app version `1.0.1`).
 
 ```bash
-git tag v1.0.0
-git push origin v1.0.0
+git tag v1.0.1
+git push origin v1.0.1
 ```
+
+Pushing to `main` alone does not trigger a build.
 
 ## Optional notarized builds
 

@@ -18,12 +18,16 @@ enum ContainerCLIError: LocalizedError {
     }
 }
 
-struct ContainerCommandResult {
+struct ContainerCommandResult: Sendable {
     let stdout: String
     let stderr: String
     let exitCode: Int32
 
-    var combinedOutput: String {
+    nonisolated var combinedOutput: String {
+        Self.makeCombinedOutput(stdout: stdout, stderr: stderr)
+    }
+
+    nonisolated static func makeCombinedOutput(stdout: String, stderr: String) -> String {
         [stdout, stderr]
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }

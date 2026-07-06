@@ -533,8 +533,8 @@ struct ContainerFormFields: View {
 
                     FormTextField(
                         title: "Name",
-                        help: "Optional friendly name used as the container ID.",
-                        placeholder: "my-web-server",
+                        help: "Container ID and network hostname. Other containers on the same network can reach this by this short name (for example db).",
+                        placeholder: "db",
                         text: $form.name
                     )
                     .disabled(lockName)

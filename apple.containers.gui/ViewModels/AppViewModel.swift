@@ -317,6 +317,25 @@ final class AppViewModel {
         }
     }
 
+    func containerGroup(for containerID: String) -> ContainerGroup? {
+        containerGroups.first { $0.memberContainerIDs.contains(containerID) }
+    }
+
+    func networkPeers(for containerID: String) -> [NetworkPeerEndpoint] {
+        guard let group = containerGroup(for: containerID) else { return [] }
+        return group.memberContainerIDs
+            .filter { $0 != containerID }
+            .compactMap { memberID in
+                guard let container = containers.first(where: { $0.id == memberID }) else { return nil }
+                return NetworkPeerEndpoint(
+                    containerID: container.id,
+                    networkName: container.networkHostName,
+                    ipv4Address: container.ipv4Address
+                )
+            }
+            .sorted { $0.networkName.localizedCaseInsensitiveCompare($1.networkName) == .orderedAscending }
+    }
+
     func prepareCreateContainerSheet() {
         createContainerForm.reset()
         createContainerError = nil
@@ -324,6 +343,11 @@ final class AppViewModel {
         composeImportSourceName = nil
         showCreateContainer = true
         Task { await ensureResourceListsLoaded() }
+    }
+
+    func openContainerFromResource(_ containerID: String) {
+        selectedSection = .containers
+        selectedContainerID = containerID
     }
 
     func prepareCreateGroupSheet() {
@@ -477,17 +501,16 @@ final class AppViewModel {
                 guard let service = document.services[serviceName] else { continue }
                 var form = service.toCreateContainerForm(serviceName: serviceName)
                 form.networkName = stackNetwork
+                form.groupMode = .new
+                form.newGroupName = trimmedName
                 try form.ensureHostPathsExist()
 
                 containerRunProgressOutput += "\n--- \(serviceName) ---\n"
 
-                let containerID = try await runContainerFromForm(form) { [weak self] chunk in
-                    Task { @MainActor in
-                        self?.containerRunProgressOutput += chunk
-                    }
-                }
+                let progressSink = makeRunProgressSink()
+                let containerID = try await runContainerFromForm(form, onOutput: progressSink.emit)
 
-                let selectedID = form.name.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty ?? containerID
+                let selectedID = containerID.nilIfEmpty ?? form.containerRunName() ?? serviceName
                 memberIDs.append(selectedID)
                 setContainerTransition(selectedID, .creating)
             }
@@ -667,7 +690,7 @@ final class AppViewModel {
 
     private func recreateContainerWithNetwork(_ containerID: String, network: String) async throws -> String {
         let record = try await cli.inspectContainer(id: containerID)
-        var form = CreateContainerForm.from(record: record)
+        var form = CreateContainerForm.from(record: record, groups: containerGroups)
         form.networkName = network
         let command = originalCommand(from: record)
         let effectiveCommand = command.isEmpty ? form.commandParts() : command
@@ -687,11 +710,11 @@ final class AppViewModel {
         }
         try await cli.deleteContainer(id: originalID, force: true)
 
-        let containerName = form.name.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty ?? originalID
         let network = form.networkName.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty ?? "default"
+        let runName = form.containerRunName()
         let newID = try await cli.runContainer(
             image: form.image.trimmingCharacters(in: .whitespacesAndNewlines),
-            name: containerName,
+            name: runName,
             command: command,
             volumes: form.cliVolumes(),
             ports: form.cliPorts(),
@@ -703,16 +726,11 @@ final class AppViewModel {
             onOutput: onOutput
         )
 
-        return containerName.nilIfEmpty ?? newID.trimmingCharacters(in: .whitespacesAndNewlines)
+        return newID.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty ?? runName ?? originalID
     }
 
-    func containerGroup(for containerID: String) -> ContainerGroup? {
-        containerGroups.first { $0.memberContainerIDs.contains(containerID) }
-    }
-
-    func openContainerFromResource(_ containerID: String) {
-        selectedSection = .containers
-        selectedContainerID = containerID
+    func containerDisplayName(for container: ContainerRecord) -> String {
+        container.containerID
     }
 
     func prepareCreateVolumeSheet() {
@@ -858,11 +876,10 @@ final class AppViewModel {
         onOutput: (@Sendable (String) -> Void)? = nil
     ) async throws -> String {
         let image = form.image.trimmingCharacters(in: .whitespacesAndNewlines)
-        let containerName = form.name.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
 
         return try await cli.runContainer(
             image: image,
-            name: containerName,
+            name: form.containerRunName(),
             command: form.commandParts(),
             volumes: form.cliVolumes(),
             ports: form.cliPorts(),
@@ -887,7 +904,7 @@ final class AppViewModel {
             let record = try await cli.inspectContainer(id: id)
             editContainerOriginalID = id
             editContainerOriginalCommand = originalCommand(from: record)
-            editContainerForm = CreateContainerForm.from(record: record)
+            editContainerForm = CreateContainerForm.from(record: record, groups: containerGroups)
             showEditContainer = true
             Task { await ensureResourceListsLoaded() }
         } catch {
@@ -910,7 +927,6 @@ final class AppViewModel {
         }
 
         let form = editContainerForm
-        let containerName = form.name.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty ?? originalID
         isLoading = true
         defer { isLoading = false }
 
@@ -929,7 +945,7 @@ final class AppViewModel {
             showEditContainer = false
             await refreshLists(silent: false)
             selectedSection = .containers
-            selectedContainerID = containerName.nilIfEmpty ?? newID
+            selectedContainerID = newID
             return true
         } catch {
             applyEditContainerError(from: error.localizedDescription)
@@ -954,52 +970,35 @@ final class AppViewModel {
         }
 
         let form = createContainerForm
-        let image = form.image.trimmingCharacters(in: .whitespacesAndNewlines)
-        let containerName = form.name.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+        let runName = form.containerRunName()
 
         showCreateContainer = false
         showContainerRunProgress = true
         isContainerRunInProgress = true
         containerRunProgressOutput = ""
-        containerRunProgressTitle = containerName ?? image
+        containerRunProgressTitle = runName ?? form.image.trimmingCharacters(in: .whitespacesAndNewlines)
 
         do {
-            let commandParts = form.commandParts()
             try form.ensureHostPathsExist()
 
-            let id = try await cli.runContainer(
-                image: image,
-                name: containerName,
-                command: commandParts,
-                volumes: form.cliVolumes(),
-                ports: form.cliPorts(),
-                env: form.cliEnv(),
-                workdir: form.workdir.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty,
-                cpus: form.cpus.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty,
-                memory: form.memory.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty,
-                network: form.networkName.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty ?? "default",
-                onOutput: { [weak self] chunk in
-                    Task { @MainActor in
-                        self?.containerRunProgressOutput += chunk
-                    }
-                }
-            )
+            let progressSink = makeRunProgressSink()
+            let id = try await runContainerFromForm(form, onOutput: progressSink.emit)
 
             isContainerRunInProgress = false
             showContainerRunProgress = false
             createContainerForm.reset()
             composeImportSourceName = nil
 
-            let selectedID = containerName ?? id
+            let selectedID = id.nilIfEmpty ?? runName ?? ""
             if !selectedID.isEmpty {
                 setContainerTransition(selectedID, .creating)
             }
 
-            assignContainerToGroup(containerID: selectedID.isEmpty ? id : selectedID, form: form)
+            assignContainerToGroup(containerID: selectedID, form: form)
 
             await refreshLists(silent: false)
             selectedSection = .containers
-            selectedContainerID = selectedID.isEmpty ? id : selectedID
+            selectedContainerID = selectedID
             scheduleAcceleratedPolling()
         } catch {
             isContainerRunInProgress = false
@@ -1324,6 +1323,24 @@ final class AppViewModel {
 
     func reportError(from raw: String) {
         applyGlobalError(from: raw)
+    }
+
+    private func makeRunProgressSink() -> MainActorProgressSink {
+        MainActorProgressSink(viewModel: self)
+    }
+}
+
+private final class MainActorProgressSink: @unchecked Sendable {
+    private weak var viewModel: AppViewModel?
+
+    init(viewModel: AppViewModel) {
+        self.viewModel = viewModel
+    }
+
+    func emit(_ chunk: String) {
+        Task { @MainActor [weak viewModel] in
+            viewModel?.containerRunProgressOutput += chunk
+        }
     }
 }
 

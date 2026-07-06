@@ -121,6 +121,45 @@ struct ContainerRecord: Identifiable, Hashable, Sendable {
         let command = parts.joined(separator: " ")
         return command.isEmpty ? "—" : command
     }
+
+    var ipv4Address: String? {
+        networks?.compactMap { network -> String? in
+            guard let address = network.address else { return nil }
+            let host = address.split(separator: "/").first.map(String.init) ?? address
+            return host.contains(".") ? host : nil
+        }.first
+    }
+
+    var networkHostName: String {
+        containerID
+    }
+
+    var networkAddressDisplay: String {
+        ipv4Address ?? "—"
+    }
+
+    var hostAccessSummary: String? {
+        guard let publish = configuration?.publish, !publish.isEmpty else { return nil }
+        let entries = publish.compactMap { port -> String? in
+            guard let hostPort = port.hostPort, let containerPort = port.containerPort else { return nil }
+            let hostAddress = (port.hostIP?.isEmpty == false ? port.hostIP : nil) ?? "127.0.0.1"
+            let proto = port.`protocol`?.uppercased() ?? "TCP"
+            return "\(hostAddress):\(hostPort) → :\(containerPort)/\(proto)"
+        }
+        return entries.isEmpty ? nil : entries.joined(separator: ", ")
+    }
+}
+
+struct NetworkPeerEndpoint: Hashable, Sendable, Identifiable {
+    let containerID: String
+    let networkName: String
+    let ipv4Address: String?
+
+    var id: String { containerID }
+
+    var envValue: String {
+        ipv4Address ?? networkName
+    }
 }
 
 struct ContainerNetwork: Hashable, Sendable {
@@ -413,6 +452,31 @@ struct CreateContainerForm {
         groupMode == .existing && selectedExistingGroupID != nil
     }
 
+    func resolvedGroupName(existingGroups: [ContainerGroup]) -> String? {
+        switch groupMode {
+        case .none:
+            return nil
+        case .existing:
+            guard let groupID = selectedExistingGroupID,
+                  let group = existingGroups.first(where: { $0.id == groupID }) else {
+                return nil
+            }
+            return group.name
+        case .new:
+            let trimmed = newGroupName.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        }
+    }
+
+    func displayNameForRegistry() -> String {
+        name.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    func containerRunName() -> String? {
+        let trimmed = displayNameForRegistry()
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
     func ensureHostPathsExist() throws {
         let bindMounts = volumeMounts.filter { $0.kind == .bind }
         try VolumeMountPaths.ensureHostPathsExist(for: bindMounts)
@@ -437,10 +501,11 @@ struct CreateContainerForm {
             .filter { !$0.isEmpty }
     }
 
-    static func from(record: ContainerRecord) -> CreateContainerForm {
+    static func from(record: ContainerRecord, groups: [ContainerGroup] = []) -> CreateContainerForm {
         var form = CreateContainerForm()
+        let group = groups.first { $0.memberContainerIDs.contains(record.containerID) }
+
         form.image = record.imageReference
-        form.name = record.containerID
         form.command = ""
         form.workdir = record.workdir ?? ""
         form.cpus = cpusLine(from: record.configuration?.resources?.cpus)
@@ -449,6 +514,13 @@ struct CreateContainerForm {
         form.volumeMounts = volumeMounts(from: record.configuration)
         form.portMappings = portMappings(from: record.configuration?.publish)
         form.envVars = envVars(from: record.configuration?.env)
+        form.name = record.containerID
+
+        if let group {
+            form.groupMode = .existing
+            form.selectedExistingGroupID = group.id
+        }
+
         return form
     }
 

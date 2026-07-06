@@ -87,30 +87,37 @@ struct ContainerListRow: View {
     var body: some View {
         let display = model.containerDisplayStatus(for: container.id)
 
-        HStack(alignment: .center, spacing: 8) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(container.displayName)
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(model.containerDisplayName(for: container))
                     .font(.headline)
                     .lineLimit(1)
-                    .truncationMode(.tail)
+                    .layoutPriority(1)
 
-                Text(container.imageReference)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
+                Spacer(minLength: 4)
+
+                StatusBadge(
+                    status: display.label,
+                    isRunning: display.isRunning,
+                    isTransitioning: display.isTransitioning
+                )
+                .fixedSize()
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .layoutPriority(1)
 
-            StatusBadge(
-                status: display.label,
-                isRunning: display.isRunning,
-                isTransitioning: display.isTransitioning
-            )
-            .fixedSize()
-            .layoutPriority(0)
+            Text(container.networkAddressDisplay)
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+                .lineLimit(1)
+
+            Text(container.imageReference)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
+                .help(container.imageReference)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, 2)
     }
 }
 
@@ -218,8 +225,8 @@ struct ContainerDetailView: View {
         ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
                     DetailHeaderView(
-                        title: record.displayName,
-                        subtitle: record.imageReference,
+                        title: model.containerDisplayName(for: record),
+                        subtitle: record.networkAddressDisplay,
                         status: display.label,
                         isRunning: display.isRunning,
                         isTransitioning: display.isTransitioning,
@@ -234,6 +241,8 @@ struct ContainerDetailView: View {
 
                     LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 12) {
                         InfoCard(title: "Image", value: record.imageReference, icon: "shippingbox")
+                        InfoCard(title: "Network name", value: record.networkHostName, icon: "network")
+                        InfoCard(title: "IP address", value: record.networkAddressDisplay, icon: "number")
                         InfoCard(title: "Platform", value: record.platformDisplay, icon: "cpu")
                         InfoCard(title: "Resources", value: "\(record.cpusDisplay) CPU · \(record.memoryDisplay)", icon: "memorychip")
                         InfoCard(title: "Command", value: record.commandDisplay, icon: "terminal")
@@ -246,6 +255,34 @@ struct ContainerDetailView: View {
 
                     if let ports = record.configuration?.publish, !ports.isEmpty {
                         PublishedPortsSection(ports: ports)
+                    }
+
+                    LeftAlignedGroupBox("Network") {
+                        VStack(alignment: .leading, spacing: 8) {
+                            DetailRow(label: "Container name", value: record.networkHostName)
+                            DetailRow(label: "IP address", value: record.networkAddressDisplay)
+                            if let hostAccess = record.hostAccessSummary {
+                                DetailRow(label: "From macOS", value: hostAccess)
+                            }
+                            Text("Containers on the same network can use the short name in env vars (for example WORDPRESS_DB_HOST=db). If that fails, use the peer IP shown below.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+
+                            let peers = model.networkPeers(for: record.id)
+                            if !peers.isEmpty {
+                                Divider()
+                                Text("Stack peers")
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(.secondary)
+                                ForEach(peers) { peer in
+                                    DetailRow(
+                                        label: peer.networkName,
+                                        value: peer.ipv4Address.map { "\($0) (recommended for env vars)" } ?? "IP unavailable"
+                                    )
+                                }
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     }
 
                     if !record.bindMountDisplays.isEmpty {
